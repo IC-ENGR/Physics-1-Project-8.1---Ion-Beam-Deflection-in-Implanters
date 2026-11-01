@@ -1,20 +1,21 @@
 import math
+import json
+import os
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import matplotlib.pyplot as plt
+from matplotlib.colors import to_rgba
 from matplotlib.patches import Circle, Rectangle
-from matplotlib.widgets import Button, CheckButtons, TextBox
+from matplotlib.transforms import blended_transform_factory
+from matplotlib.widgets import Button
 
+# state vector of the ion:  s = (z, x, y, vz, vx, vy)
+Z, X, Y, VZ, VX, VY = range(6)
 
-
-# --------------------------------------------------------------------------- #
-#  Constants
-# --------------------------------------------------------------------------- #
-E_CHARGE = 1.602176634e-19       # C   elementary charge
-AMU = 1.66053906660e-27         # kg  atomic mass unit
-Z_START = -0.08                 # m   ion starts at the exit of the acceleration tube
-GAP_XY = 0.02                   # m   drift distance between X-plates and Y-plates
+# regions of the beam line
+R_PRE, R_XPL, R_GAP, R_YPL, R_POST = range(5)
+HITS = ("wafer", "plate_x", "plate_y")
 
 
 # --------------------------------------------------------------------------- #
@@ -22,19 +23,24 @@ GAP_XY = 0.02                   # m   drift distance between X-plates and Y-plat
 # --------------------------------------------------------------------------- #
 @dataclass
 class Params:
-    V0_kV: float = 20.0         # accelerating voltage              (kV)
-    Vd: float = 1000.0          # Y deflecting voltage              (V)
-    Vdx: float = 1000.0         # X deflecting voltage              (V)
-    lx: float = 0.08            # length of X plates                (m)
-    ly: float = 0.10            # length of Y plates                (m)
-    dx_plate: float = 0.04      # distance between X plates         (m)
-    d: float = 0.04             # distance between Y plates         (m)
-    L: float = 0.50             # distance to the target wafer      (m)
-    q_e: float = 1.0            # ion charge                        (multiples of e)
-    m_u: float = 31.0           # ion mass                          (atomic mass units)
-    Bx_mT: float = 0.0          # stray magnetic field B_x          (millitesla)
-    speed: float = 1.0          # simulation speed multiplier
-    L_from_centre: bool = False # False: L from Y-plate entrance / True: from Y-plate centre
+    V0_kV: float = 20.0
+    Vd: float = 1000.0
+    l: float = 0.10
+    d: float = 0.04
+    Vx: float = 500.0
+    lx: float = 0.10
+    dx: float = 0.02
+    gap_xy: float = 0.05
+    L: float = 0.50
+    wafer_mm: float = 150.0
+    q_e: float = 1.0
+    m_u: float = 31.0
+    L_from_centre: bool = False
+
+    E_CHARGE: float = 1.602176634e-19
+    AMU: float = 1.66053906660e-27
+    TUBE_LEN: float = 0.08
+    TUBE_GAP: float = 0.08
 
     @property
     def V0(self) -> float:
@@ -42,80 +48,77 @@ class Params:
 
     @property
     def q(self) -> float:
-        return self.q_e * E_CHARGE
+        return self.q_e * self.E_CHARGE
 
     @property
     def m(self) -> float:
-        return self.m_u * AMU
-
-    @property
-    def Bx(self) -> float:
-        return self.Bx_mT * 1e-3
+        return self.m_u * self.AMU
 
     @property
     def v0(self) -> float:
         return math.sqrt(2.0 * self.q * self.V0 / self.m)
 
     @property
-    def z_x_start(self) -> float:
-        return 0.0
+    def wafer_R(self) -> float:
+        return 0.5e-3 * self.wafer_mm
 
     @property
-    def z_x_end(self) -> float:
-        return self.lx
+    def zx0(self) -> float:
+        return -(self.gap_xy + self.lx)
 
     @property
-    def z_y_start(self) -> float:
-        return self.lx + GAP_XY
+    def zx1(self) -> float:
+        return -self.gap_xy
 
     @property
-    def z_y_end(self) -> float:
-        return self.lx + GAP_XY + self.ly
+    def zcx(self) -> float:
+        return 0.5 * (self.zx0 + self.zx1)
+
+    @property
+    def z_start(self) -> float:
+        return self.zx0 - self.TUBE_GAP
 
     @property
     def z_wafer(self) -> float:
-        y_ref_centre = self.z_y_start + (self.ly / 2.0)
-        return self.L + (y_ref_centre if self.L_from_centre else 0.0)
+        return self.L + (self.l / 2.0 if self.L_from_centre else 0.0)
+
+    @property
+    def Lx(self) -> float:
+        return self.z_wafer - self.zcx
+
+    @property
+    def tan_theta(self) -> float:
+        return self.Vd * self.l / (2.0 * self.V0 * self.d)
+
+    @property
+    def tan_theta_x(self) -> float:
+        return self.Vx * self.lx / (2.0 * self.V0 * self.dx)
 
     @property
     def t_ref(self) -> float:
-        return (self.z_wafer - Z_START) / self.v0
+        return (self.z_wafer - self.z_start) / self.v0
 
 
 # --------------------------------------------------------------------------- #
-#  Equation of motion  (state = z, y, x, vz, vy, vx)
+#  Physics Engine
 # --------------------------------------------------------------------------- #
 def region(p: Params, z: float) -> int:
-    """
-    0 = before X plates (z < 0)
-    1 = inside X plates (0 <= z <= lx)
-    2 = drift between X and Y plates (lx < z < lx + GAP_XY)
-    3 = inside Y plates (lx + GAP_XY <= z <= lx + GAP_XY + ly)
-    4 = after Y plates / drift to wafer
-    """
-    if z < 0.0:
-        return 0
-    if z <= p.z_x_end:
-        return 1
-    if z < p.z_y_start:
-        return 2
-    if z <= p.z_y_end:
-        return 3
-    return 4
+    if z < p.zx0: return R_PRE
+    if z <= p.zx1: return R_XPL
+    if z < 0.0: return R_GAP
+    if z <= p.l: return R_YPL
+    return R_POST
 
 
 def derivs(p: Params, s, reg: int):
-    """Lorentz force F = q E + q v x B with E_x in X-plates, E_y in Y-plates, B_x."""
-    _, y, x, vz, vy, vx = s
+    _, _, _, vz, vx, vy = s
     k = p.q / p.m
-    ex = p.Vdx / p.dx_plate if reg == 1 else 0.0
-    ey = p.Vd / p.d if reg == 3 else 0.0
-    bx = p.Bx
-
-    az = k * (-vy * bx)
-    ay = k * (ey + vz * bx)
-    ax = k * (ex - vy * bx)
-    return (vz, vy, vx, az, ay, ax)
+    ex = p.Vx / p.dx if reg == R_XPL else 0.0
+    ey = p.Vd / p.d if reg == R_YPL else 0.0
+    a_x = k * ex
+    a_y = k * ey
+    a_z = 0.0
+    return (vz, vx, vy, a_z, a_x, a_y)
 
 
 def rk4(p: Params, s, dt: float, reg: int):
@@ -129,18 +132,18 @@ def rk4(p: Params, s, dt: float, reg: int):
 
 def advance(p: Params, s, dt: float, reg: int, events: list, depth: int = 0):
     s1 = rk4(p, s, dt, reg)
-    r1 = region(p, s1[0])
-    if r1 == reg or depth >= 5:
+    r1 = region(p, s1[Z])
+    if r1 == reg or depth >= 8:
         return s1, r1
     lo, hi = 0.0, dt
     for _ in range(50):
         mid = 0.5 * (lo + hi)
-        if region(p, rk4(p, s, mid, reg)[0]) == reg:
+        if region(p, rk4(p, s, mid, reg)[Z]) == reg:
             lo = mid
         else:
             hi = mid
     sb = rk4(p, s, hi, reg)
-    rb = region(p, sb[0])
+    rb = region(p, sb[Z])
     events.append((reg, rb, sb))
     return advance(p, sb, dt - hi, rb, events, depth + 1)
 
@@ -154,140 +157,84 @@ def micro_step(p: Params, s, reg: int, dt: float):
     def lerp(f):
         return tuple(a + f * (b - a) for a, b in zip(s, s_new))
 
-    half_gap_x = p.dx_plate / 2.0
-    half_gap_y = p.d / 2.0
+    def hit_fraction(idx, half_gap):
+        a0, a1 = abs(s[idx]), abs(s_new[idx])
+        return min(1.0, max(0.0, (half_gap - a0) / (a1 - a0))) if a1 > a0 else 1.0
 
-    if reg_new == 1 and abs(s_new[2]) >= half_gap_x:
-        a0, a1 = abs(s[2]), abs(s_new[2])
-        frac = min(1.0, max(0.0, (half_gap_x - a0) / (a1 - a0))) if a1 > a0 else 1.0
+    if reg_new == R_XPL and abs(s_new[X]) >= p.dx / 2.0:
+        frac = hit_fraction(X, p.dx / 2.0)
         s_new, outcome = lerp(frac), "plate_x"
-    elif reg_new == 3 and abs(s_new[1]) >= half_gap_y:
-        a0, a1 = abs(s[1]), abs(s_new[1])
-        frac = min(1.0, max(0.0, (half_gap_y - a0) / (a1 - a0))) if a1 > a0 else 1.0
+    elif reg_new == R_YPL and abs(s_new[Y]) >= p.d / 2.0:
+        frac = hit_fraction(Y, p.d / 2.0)
         s_new, outcome = lerp(frac), "plate_y"
-    elif s_new[0] >= p.z_wafer:
-        frac = (p.z_wafer - s[0]) / (s_new[0] - s[0])
+    elif s_new[Z] >= p.z_wafer:
+        frac = (p.z_wafer - s[Z]) / (s_new[Z] - s[Z])
         s_new, outcome = lerp(frac), "wafer"
-    elif s_new[3] <= 0.0:
+    elif s_new[VZ] <= 0.0:
         outcome = "miss"
     return s_new, reg_new, events, outcome, frac
 
 
-# --------------------------------------------------------------------------- #
-#  Forecast
-# --------------------------------------------------------------------------- #
 @dataclass
-class Forecast:
-    z: List[float]
-    y: List[float]
-    x: List[float]
-    outcome: str
-    z_hit: float
-    y_hit: float
-    x_hit: float
-    t_total: float
-    theta_exit_y: Optional[float]
-    theta_exit_x: Optional[float]
-    y_exit: Optional[float]
-    x_exit: Optional[float]
+class PlateExit:
+    z: float
+    pos: float
+    theta: float
 
 
-def compute_forecast(p: Params) -> Forecast:
-    s = (Z_START, 0.0, 0.0, p.v0, 0.0, 0.0)
-    reg = region(p, s[0])
-    dt = p.t_ref / 700.0
-    zs, ys, xs = [s[0]], [s[1]], [s[2]]
-    t = 0.0
-    theta_exit_y, theta_exit_x, y_exit, x_exit, outcome = None, None, None, None, None
-    for _ in range(4000):
-        s_new, reg_new, events, outcome, frac = micro_step(p, s, reg, dt)
-        for r_from, r_to, sb in events:
-            if r_from == 1 and r_to == 2 and theta_exit_x is None:
-                theta_exit_x, x_exit = math.atan2(sb[5], sb[3]), sb[2]
-            if r_from == 3 and r_to == 4 and theta_exit_y is None:
-                theta_exit_y, y_exit = math.atan2(sb[4], sb[3]), sb[1]
-        t += frac * dt
-        zs.append(s_new[0])
-        ys.append(s_new[1])
-        xs.append(s_new[2])
-        s, reg = s_new, reg_new
-        if outcome:
-            break
-    return Forecast(zs, ys, xs, outcome or "miss", s[0], s[1], s[2], t,
-                    theta_exit_y, theta_exit_x, y_exit, x_exit)
+def note_exits(events, exits: Dict[str, PlateExit]):
+    for r_from, r_to, sb in events:
+        if r_to <= r_from: continue
+        if r_from == R_XPL and "x" not in exits:
+            exits["x"] = PlateExit(sb[Z], sb[X], math.atan2(sb[VX], sb[VZ]))
+        elif r_from == R_YPL and "y" not in exits:
+            exits["y"] = PlateExit(sb[Z], sb[Y], math.atan2(sb[VY], sb[VZ]))
 
 
 # --------------------------------------------------------------------------- #
-#  Live Ion
+#  Live Ion Object
 # --------------------------------------------------------------------------- #
 class Ion:
     def __init__(self, p: Params):
         self.reset(p)
 
     def reset(self, p: Params):
-        self.s = (Z_START, 0.0, 0.0, p.v0, 0.0, 0.0)
-        self.reg = region(p, Z_START)
+        self.s = (p.z_start, 0.0, 0.0, p.v0, 0.0, 0.0)
+        self.reg = region(p, p.z_start)
         self.t = 0.0
-        self.trail_z = [Z_START]
-        self.trail_y = [0.0]
+        self.trail_z = [p.z_start]
         self.trail_x = [0.0]
+        self.trail_y = [0.0]
         self.outcome: Optional[str] = None
-        self.theta_exit_y: Optional[float] = None
-        self.theta_exit_x: Optional[float] = None
-        self.y_exit: Optional[float] = None
-        self.x_exit: Optional[float] = None
+        self.exits: Dict[str, PlateExit] = {}
 
     def advance(self, p: Params, dt: float, n_sub: int = 4):
         h = dt / n_sub
         for _ in range(n_sub):
-            if self.outcome:
-                break
+            if self.outcome: break
             s_new, reg_new, events, outcome, frac = micro_step(p, self.s, self.reg, h)
-            for r_from, r_to, sb in events:
-                if r_from == 1 and r_to == 2 and self.theta_exit_x is None:
-                    self.theta_exit_x, self.x_exit = math.atan2(sb[5], sb[3]), sb[2]
-                if r_from == 3 and r_to == 4 and self.theta_exit_y is None:
-                    self.theta_exit_y, self.y_exit = math.atan2(sb[4], sb[3]), sb[1]
+            note_exits(events, self.exits)
             self.t += frac * h
             self.s, self.reg, self.outcome = s_new, reg_new, outcome
-            self.trail_z.append(s_new[0])
-            self.trail_y.append(s_new[1])
-            self.trail_x.append(s_new[2])
-
-
-# --------------------------------------------------------------------------- #
-#  Text Input Definitions: key, label, initial_value, column, row
-# --------------------------------------------------------------------------- #
-TEXT_INPUTS = [
-    ("V0_kV", r"$V_0$ (kV):", "20.0", 0, 0),
-    ("Vd", r"$V_d$ (Y) (V):", "1000.0", 0, 1),
-    ("Vdx", r"$V_{dx}$ (X) (V):", "1000.0", 0, 2),
-    ("q_e", r"$q$ (×e):", "1.0", 1, 0),
-    ("m_u", r"$m$ (u):", "31.0", 1, 1),
-    ("lx", r"$l_x$ (m):", "0.08", 1, 2),
-    ("ly", r"$l_y$ (m):", "0.10", 2, 0),
-    ("dx_plate", r"$d_x$ (m):", "0.04", 2, 1),
-    ("d", r"$d_y$ (m):", "0.04", 2, 2),
-    ("L", r"$L$ (m):", "0.50", 3, 0),
-    ("Bx_mT", r"$B_x$ (mT):", "0.0", 3, 1),
-    ("speed", "speed (×):", "1.0", 3, 2),
-]
+            self.trail_z.append(s_new[Z])
+            self.trail_x.append(s_new[X])
+            self.trail_y.append(s_new[Y])
 
 
 # --------------------------------------------------------------------------- #
 #  Application
 # --------------------------------------------------------------------------- #
 class App:
-    FRAME_MS = 16          # Strict ~60 Hz tick interval (~16.67 ms, set to 16ms)
-    FRAMES_PER_FLIGHT = 330 # Doubled frames to match the 60 Hz rate for equal flight duration
-    STEPS_PER_FLIGHT = 50
+    FRAME_MS = 0.01
+    FRAMES_PER_FLIGHT = 50
+    STEPS_PER_FLIGHT = 500
 
     def __init__(self):
-        self.p = Params()
-        self.fc = compute_forecast(self.p)
+        self.p = self.load_params_from_json()
         self.ion = Ion(self.p)
         self.running = False
         self.scene = []
+        self.yl = 0.06
         self._build_figure()
         self.rebuild_scene()
         self.refresh()
@@ -295,217 +242,206 @@ class App:
         self.timer.add_callback(self.tick)
         self.timer.start()
 
-    def _build_figure(self):
-        self.fig = plt.figure(figsize=(16, 10.5))
-        try:
-            self.fig.canvas.manager.set_window_title("Ion beam deflection simulator (60 Hz)")
-        except Exception:
-            pass
-        self.fig.suptitle("Ion-beam deflection simulator — X & Y scan plates and wafer impact (60 Hz)",
-                          fontsize=13, fontweight="bold", y=0.98)
+    def load_params_from_json(self) -> Params:
+        with open("data.json", "r") as f:
+            data = json.load(f)
+            # Merge constants and params into a single dict
+            combined = {**data.get("constants", {}), **data.get("params", {})}
+            return Params(**combined)
 
-        # 1. Main plot (y-z view) -------------------------------------------
-        self.ax = self.fig.add_axes([0.05, 0.54, 0.58, 0.39])
-        self.ax.set_title("main: Y-Z Beam Deflection View", fontsize=10, fontweight="bold")
+    def _build_figure(self):
+        self.fig = plt.figure(figsize=(15, 9.6))
+        self.fig.suptitle("Ion-beam scanning simulator (Data-driven)", fontsize=13, fontweight="bold", y=0.99)
+
+        # Main window
+        self.ax = self.fig.add_axes([0.055, 0.585, 0.62, 0.335])
         self.ax.set_xlabel("z (m)")
         self.ax.set_ylabel("y (m)")
         self.ax.grid(alpha=0.25)
-        (self.ln_fc,) = self.ax.plot([], [], "--", color="#ff7f0e", lw=1.8, zorder=4, label="forecast")
-        (self.ln_trail,) = self.ax.plot([], [], "-", color="#1f77b4", lw=2.6, zorder=5, label="path so far")
-        (self.pt_ion,) = self.ax.plot([], [], "o", ms=9, color="#1f77b4", mec="k", zorder=7)
-        (self.pt_fc,) = self.ax.plot([], [], "o", ms=10, mfc="none", mec="#d62728", mew=2, zorder=6)
-        (self.pt_hit,) = self.ax.plot([], [], "X", ms=10, color="#d62728", mec="k", zorder=8)
-        self.ion_lbl = self.ax.annotate("ion", xy=(Z_START, 0), xytext=(6, 10),
-                                   textcoords="offset points", fontsize=8.5, zorder=9)
-        self.ax.legend(loc="upper right", fontsize=8, frameon=True)
+        (self.ln_trail,) = self.ax.plot([], [], "-", color="#1f77b4", lw=2.6, label="ion path")
+        (self.pt_ion,) = self.ax.plot([], [], "o", ms=11, color="#1f77b4", mec="k", zorder=7)
+        (self.pt_hit,) = self.ax.plot([], [], "X", ms=11, color="#d62728", mec="k", zorder=8)
+        self.ion_lbl = self.ax.annotate("3: ion (m, q)", xy=(0, 0), xytext=(8, 12), textcoords="offset points",
+                                        fontsize=9, zorder=9)
 
-        # 2. X plates window ('x') ------------------------------------------
-        self.ax_x = self.fig.add_axes([0.05, 0.28, 0.27, 0.20])
-        self.ax_x.set_title("x: X-Scan Plates View (X-Z)", fontsize=9, fontweight="bold")
-        self.ax_x.set_xlabel("z (m)")
-        self.ax_x.set_ylabel("x (m)")
-        self.ax_x.grid(alpha=0.25)
-        (self.ln_x_fc,) = self.ax_x.plot([], [], "--", color="#ff7f0e", lw=1.5)
-        (self.ln_x_trail,) = self.ax_x.plot([], [], "-", color="#2ca02c", lw=2.0)
-        (self.pt_x_ion,) = self.ax_x.plot([], [], "o", ms=8, color="#2ca02c", mec="k")
+        # X-view
+        self.axx = self.fig.add_axes([0.055, 0.285, 0.275, 0.215])
+        self.axx.set_title("2x: x-scan plates (x-z view)", fontsize=10, fontweight="bold")
+        (self.ln_trail_x,) = self.axx.plot([], [], "-", color="#1f77b4", lw=2.6)
+        (self.pt_ion_x,) = self.axx.plot([], [], "o", ms=9, color="#1f77b4", mec="k")
+        (self.pt_hit_x,) = self.axx.plot([], [], "X", ms=10, color="#d62728", mec="k")
 
-        # 3. Wafer window ('wafer') -----------------------------------------
-        self.ax_wafer = self.fig.add_axes([0.36, 0.28, 0.27, 0.20])
-        self.ax_wafer.set_title("wafer: Target Impact (X-Y)", fontsize=9, fontweight="bold")
-        self.ax_wafer.set_xlabel("x (m)")
-        self.ax_wafer.set_ylabel("y (m)")
-        self.ax_wafer.grid(alpha=0.25)
-        self.ax_wafer.set_aspect("equal")
-        (self.pt_wafer_fc,) = self.ax_wafer.plot([], [], "o", ms=10, mfc="none", mec="#d62728", mew=2, label="forecast")
-        (self.pt_wafer_hit,) = self.ax_wafer.plot([], [], "X", ms=10, color="#d62728", mec="k", label="simulated")
-        self.ax_wafer.legend(loc="upper right", fontsize=8)
+        # Wafer-view
+        fw, fh = self.fig.get_size_inches()
+        side = 0.215 * fh / fw
+        self.axw = self.fig.add_axes([0.385, 0.285, side, 0.215])
+        self.axw.set_aspect("equal", adjustable="box")
+        self.axw.set_title("5: target wafer (x-y plane)", fontsize=10, fontweight="bold")
+        (self.ln_trail_w,) = self.axw.plot([], [], "-", color="#1f77b4", lw=2.2)
+        (self.pt_ion_w,) = self.axw.plot([], [], "o", ms=8, color="#1f77b4", mec="k")
+        (self.pt_hit_w,) = self.axw.plot([], [], "X", ms=11, color="#d62728", mec="k")
 
-        # 4. Results panel --------------------------------------------------
-        self.axi = self.fig.add_axes([0.65, 0.54, 0.32, 0.39])
-        self.axi.set_xticks([])
+        # Readout
+        x_r = 0.385 + side + 0.022
+        self.axr = self.fig.add_axes([x_r, 0.285, 0.675 - x_r, 0.215])
+        self.axr.set_xticks([]);
+        self.axr.set_yticks([])
+        self.axr.set_facecolor("#f5f6fa")
+        kw = dict(va="top", ha="left", family="monospace", fontsize=8.5, transform=self.axr.transAxes)
+        self.axr.text(0.06, 0.95, "SIMULATED IMPACT", fontweight="bold", **kw)
+        self.wr_sim = self.axr.text(0.06, 0.42, "", **kw)
+
+        # Results panel
+        self.axi = self.fig.add_axes([0.70, 0.285, 0.29, 0.635])
+        self.axi.set_xticks([]);
         self.axi.set_yticks([])
         self.axi.set_facecolor("#f5f6fa")
-        self.info = self.axi.text(0.03, 0.985, "", va="top", ha="left", family="monospace",
-                                  fontsize=8.3, transform=self.axi.transAxes)
+        self.info = self.axi.text(0.03, 0.985, "", va="top", ha="left", family="monospace", fontsize=8.7,
+                                  transform=self.axi.transAxes)
 
-        # 5. Buttons --------------------------------------------------------
-        bw, bh, by = 0.075, 0.04, 0.225
-        self.b_run = Button(self.fig.add_axes([0.65, by, bw, bh]), "Start", color="#b7e4c7")
-        self.b_step = Button(self.fig.add_axes([0.735, by, bw, bh]), "Step", color="#ffe8a3")
-        self.b_reset = Button(self.fig.add_axes([0.82, by, bw, bh]), "Reset", color="#ffc9c9")
-        self.b_def = Button(self.fig.add_axes([0.905, by, bw, bh]), "Defaults", color="#dfe3f7")
-        for b in (self.b_run, self.b_step, self.b_reset, self.b_def):
-            b.label.set_fontsize(10)
+        # Buttons
+        bw, bh, by = 0.075, 0.04, 0.185
+        self.b_run = Button(self.fig.add_axes([0.055, by, bw, bh]), "Start", color="#b7e4c7")
+        self.b_reset = Button(self.fig.add_axes([0.225, by, bw, bh]), "Reset", color="#ffc9c9")
         self.b_run.on_clicked(self.on_run)
-        self.b_step.on_clicked(self.on_step)
         self.b_reset.on_clicked(self.on_reset)
-        self.b_def.on_clicked(self.on_defaults)
-
-        # Check-box for L reference -----------------------------------------
-        ax_chk = self.fig.add_axes([0.65, 0.175, 0.32, 0.045])
-        ax_chk.set_frame_on(False)
-        self.chk = CheckButtons(ax_chk, ["measure L from Y-plate centre"], [False])
-        self.chk.labels[0].set_fontsize(9)
-        self.chk.on_clicked(self.on_param)
-
-        # 6. Text inputs control panel --------------------------------------
-        self.fig.text(0.05, 0.245, "CONTROL PANEL (type value & press Enter)", fontsize=10, fontweight="bold")
-        self.txt_boxes = {}
-        col_x = [0.10, 0.25, 0.40, 0.53]
-        row_y = [0.18, 0.12, 0.06]
-        for key, label, vinit, col, row in TEXT_INPUTS:
-            tax = self.fig.add_axes([col_x[col], row_y[row], 0.07, 0.035])
-            txt_box = TextBox(tax, label, initial=vinit)
-            txt_box.label.set_fontsize(9)
-            txt_box.text_disp.set_fontsize(9)
-            txt_box.on_submit(self.on_param)
-            self.txt_boxes[key] = txt_box
-
-        self.fig.canvas.mpl_connect("key_press_event", self.on_key)
 
     def rebuild_scene(self):
         for a in self.scene:
             try:
                 a.remove()
-            except Exception:
+            except:
                 pass
         self.scene = []
+        self._scene_main()
+        self._scene_xz()
+        self._scene_wafer()
+
+    def _scene_main(self):
+        ax, p = self.ax, self.p
         add = self.scene.append
-        ax, ax_x, ax_w, p, fc = self.ax, self.ax_x, self.ax_wafer, self.p, self.fc
-
-        ymax_path = max((abs(v) for v in fc.y), default=0.0)
-        yl = max(0.06, 0.9 * p.d, 1.35 * ymax_path)
-        zw = p.z_wafer
-
-        ax.set_xlim(Z_START - 0.05, zw + 0.05)
+        ymax_path = max((abs(v) for v in [0.0]), default=0.0)
+        yl = max(0.06, 0.9 * p.d, 1.15 * p.wafer_R)
+        yl = math.ceil(yl * 100 - 1e-9) / 100.0
+        self.yl = yl
+        zw, zs = p.z_wafer, p.z_start
+        ax.set_xlim(zs - 0.10, zw + 0.10)
         ax.set_ylim(-yl, yl)
-        th = 0.07 * yl
-        hh = 0.78 * yl
+        th, hh = 0.07 * yl, 0.78 * yl
+        top = ax.get_xaxis_transform()
 
-        # Main view: acceleration tube
-        add(ax.add_patch(Rectangle((Z_START - 0.06, -hh), 0.06, 2 * hh, fc="#c46b4d", ec="#5c2e1e", lw=1.0, zorder=1)))
-        # X-plates in main view (indicated)
-        add(ax.add_patch(Rectangle((0, -hh * 0.8), p.lx, 2 * hh * 0.8, fc="#e6f2ff", ec="#2a6fdb", lw=1.0, ls="--", zorder=1)))
-        add(ax.text(p.lx / 2, 0, "X-plates\n(hidden y)", color="#2a6fdb", ha="center", va="center", fontsize=8, zorder=2))
-        # Y-plates in main view
-        add(ax.add_patch(Rectangle((p.z_y_start, p.d / 2), p.ly, th, fc="#d62728", ec="k", lw=0.8, zorder=2)))
-        add(ax.add_patch(Rectangle((p.z_y_start, -p.d / 2 - th), p.ly, th, fc="#1f77b4", ec="k", lw=0.8, zorder=2)))
-        # Target wafer in main view
-        add(ax.add_patch(Rectangle((zw - 0.001, -0.015), 0.002, 0.03, fc="#d9dcf2", ec="#444", lw=1.2, zorder=1)))
-        add(ax.plot([Z_START, zw], [0, 0], "--", color="#444", lw=0.8, zorder=1)[0])
+        add(ax.add_patch(
+            Rectangle((zs - Params.TUBE_LEN, -hh), Params.TUBE_LEN, 2 * hh, fc="#c46b4d", ec="#5c2e1e", lw=1.2,
+                      zorder=1)))
+        add(ax.text(zs - Params.TUBE_LEN / 2, 0, rf"$V_0$ = {p.V0_kV:g} kV", rotation=90, color="white", ha="center",
+                    va="center", fontsize=11, fontweight="bold", zorder=3))
+        add(ax.add_patch(
+            Rectangle((zw - 0.001, -p.wafer_R), 0.002, 2 * p.wafer_R, fc="#d9dcf2", ec="#444", lw=1.2, zorder=1)))
 
-        # X window view
-        xmax_path = max((abs(v) for v in fc.x), default=0.0)
-        xl = max(0.04, 0.9 * p.dx_plate, 1.4 * xmax_path)
-        ax_x.set_xlim(-0.02, p.lx + 0.05)
-        ax_x.set_ylim(-xl, xl)
-        th_x = 0.07 * xl
-        ax_x.add_patch(Rectangle((0, p.dx_plate / 2), p.lx, th_x, fc="#d62728", ec="k", lw=0.8))
-        ax_x.add_patch(Rectangle((0, -p.dx_plate / 2 - th_x), p.lx, th_x, fc="#1f77b4", ec="k", lw=0.8))
-        ax_x.plot([0, p.lx + 0.03], [0, 0], "--", color="#444", lw=0.8)
+        neg, pos, grey = "#d62728", "#1f77b4", "#999999"
+        wy = p.d / 2 + th
+        cx, sx = (pos, "+") if p.Vx > 0 else (neg, "−" if p.Vx < 0 else (grey, ""))
+        add(ax.add_patch(Rectangle((p.zx0, -wy), p.lx, 2 * wy, fc=to_rgba(cx, 0.28), ec="k", lw=0.8, zorder=2)))
 
-        # Wafer window view (X-Y)
-        w_lim = max(0.02, 1.5 * max(abs(fc.x_hit), abs(fc.y_hit), 0.01))
-        self.ax_wafer.set_xlim(-w_lim, w_lim)
-        self.ax_wafer.set_ylim(-w_lim, w_lim)
-        wafer_circle = Circle((0, 0), w_lim * 0.85, fc="#eef2f7", ec="#333", lw=1.5, zorder=1)
-        self.ax_wafer.add_patch(wafer_circle)
-        self.ax_wafer.axhline(0, color="#ccc", lw=0.8, ls="--")
-        self.ax_wafer.axvline(0, color="#ccc", lw=0.8, ls="--")
+        if p.Vd > 0:
+            ctop, cbot, stop, sbot = neg, pos, "−", "+"
+        elif p.Vd < 0:
+            ctop, cbot, stop, sbot = pos, neg, "+", "−"
+        else:
+            ctop = cbot = grey; stop = sbot = ""
+        add(ax.add_patch(Rectangle((0, p.d / 2), p.l, th, fc=ctop, ec="k", lw=0.8, zorder=2)))
+        add(ax.add_patch(Rectangle((0, -p.d / 2 - th), p.l, th, fc=cbot, ec="k", lw=0.8, zorder=2)))
+
+        add(ax.plot([zs, zw], [0, 0], "--", color="#444", lw=0.9, zorder=1)[0])
+
+    def _scene_xz(self):
+        ax, p = self.axx, self.p
+        add = self.scene.append
+        z0, z1, lx, dx = p.zx0, p.zx1, p.lx, p.dx
+        zl, zr = z0 - 0.30 * lx, z1 + 0.22 * lx
+        xl = 0.95 * dx
+        ax.set_xlim(zl, zr)
+        ax.set_ylim(-xl, xl)
+        th = 0.10 * dx
+        tr = blended_transform_factory(ax.transAxes, ax.transData)
+        neg, pos, grey = "#d62728", "#1f77b4", "#999999"
+        if p.Vx > 0:
+            ctop, cbot, stop, sbot = neg, pos, "−", "+"
+        elif p.Vx < 0:
+            ctop, cbot, stop, sbot = pos, neg, "+", "−"
+        else:
+            ctop = cbot = grey; stop = sbot = ""
+        add(ax.add_patch(Rectangle((z0, dx / 2), lx, th, fc=ctop, ec="k", lw=0.8, zorder=2)))
+        add(ax.add_patch(Rectangle((z0, -dx / 2 - th), lx, th, fc=cbot, ec="k", lw=0.8, zorder=2)))
+
+    def _scene_wafer(self):
+        ax, p = self.axw, self.p
+        add = self.scene.append
+        R = p.wafer_R * 1e3
+        lim = 1.3 * R
+        ax.set_xlim(-lim, lim)
+        ax.set_ylim(-lim, lim)
+        add(ax.add_patch(Circle((0, 0), R, fc="#d9dcf2", ec="#444", lw=1.5, zorder=1)))
+        add(ax.plot([-lim, lim], [0, 0], "-", color="#8a8a8a", lw=0.7, zorder=2)[0])
+        add(ax.plot([0, 0], [-lim, lim], "-", color="#8a8a8a", lw=0.7, zorder=2)[0])
 
     def refresh(self):
-        p, fc, ion = self.p, self.fc, self.ion
-        self.ln_fc.set_data(fc.z, fc.y)
+        p, ion = self.p, self.ion
+        mm = 1e3
         self.ln_trail.set_data(ion.trail_z, ion.trail_y)
-        self.pt_ion.set_data([ion.s[0]], [ion.s[1]])
-        self.ion_lbl.xy = (ion.s[0], ion.s[1])
+        self.pt_ion.set_data([ion.s[Z]], [ion.s[Y]])
+        self.ion_lbl.xy = (ion.s[Z], ion.s[Y])
 
-        self.ln_x_fc.set_data(fc.z[:len(fc.x)], fc.x)
-        self.ln_x_trail.set_data(ion.trail_z, ion.trail_x)
-        self.pt_x_ion.set_data([ion.s[0]], [ion.s[2]])
-
-        if fc.outcome in ("wafer", "plate_y", "plate_x"):
-            self.pt_fc.set_data([fc.z_hit], [fc.y_hit])
-            self.pt_wafer_fc.set_data([fc.x_hit], [fc.y_hit])
-        else:
-            self.pt_fc.set_data([], [])
-            self.pt_wafer_fc.set_data([], [])
-
-        if ion.outcome in ("wafer", "plate_y", "plate_x"):
-            self.pt_hit.set_data([ion.s[0]], [ion.s[1]])
-            self.pt_wafer_hit.set_data([ion.s[2]], [ion.s[1]])
+        if ion.outcome in HITS:
+            self.pt_hit.set_data([ion.s[Z]], [ion.s[Y]])
         else:
             self.pt_hit.set_data([], [])
-            self.pt_wafer_hit.set_data([], [])
 
-        self.info.set_text(self.info_text())
-        self.b_run.label.set_text("Stop" if self.running else "Start")
-        self.fig.canvas.draw()
-
-    def info_text(self) -> str:
-        p, fc, ion = self.p, self.fc, self.ion
-        L_ = []
-        L_.append("BEAM & VOLTAGES (60 Hz)")
-        L_.append(f" v0  = {p.v0:.3e} m/s  E_k = {p.q_e * p.V0_kV:.1f} keV")
-        L_.append(f" V_dx = {p.Vdx:+.0f} V | V_d = {p.Vd:+.0f} V")
-        L_.append("")
-        L_.append("SIMULATION STATUS")
-        status = {"wafer": "reached wafer", "plate_y": "HIT Y PLATE",
-                  "plate_x": "HIT X PLATE", "miss": "turned back"}.get(ion.outcome or "")
-        if status is None:
-            status = "running" if self.running else ("ready" if ion.t == 0 else "paused")
-        L_.append(f" status = {status}")
-        L_.append(f" t = {ion.t * 1e6:.4f} µs")
-        L_.append(f" z = {ion.s[0]:+.4f} m")
-        L_.append(f" y = {ion.s[1]:+.4f} m ({ion.s[1]*1e3:+.2f} mm)")
-        L_.append(f" x = {ion.s[2]:+.4f} m ({ion.s[2]*1e3:+.2f} mm)")
-        L_.append("")
-        L_.append("WAFER IMPACT POINT (Forecast)")
-        if fc.outcome == "wafer":
-            L_.append(f" x = {fc.x_hit * 1e3:+.2f} mm")
-            L_.append(f" y = {fc.y_hit * 1e3:+.2f} mm")
+        self.ln_trail_x.set_data(ion.trail_z, ion.trail_x)
+        self.pt_ion_x.set_data([ion.s[Z]], [ion.s[X]])
+        if ion.outcome == "plate_x":
+            self.pt_hit_x.set_data([ion.s[Z]], [ion.s[X]])
         else:
-            L_.append(f" outcome: {fc.outcome}")
-        return "\n".join(L_)
+            self.pt_hit_x.set_data([], [])
 
-    def read_params(self):
-        v = {}
-        for k, tb in self.txt_boxes.items():
-            try:
-                v[k] = float(tb.text)
-            except ValueError:
-                v[k] = getattr(self.p, k, 1.0)
-        self.p = Params(V0_kV=v["V0_kV"], Vd=v["Vd"], Vdx=v["Vdx"], lx=v["lx"], ly=v["ly"],
-                        dx_plate=v["dx_plate"], d=v["d"], L=v["L"], q_e=v["q_e"],
-                        m_u=v["m_u"], Bx_mT=v["Bx_mT"], speed=v["speed"],
-                        L_from_centre=bool(self.chk.get_status()[0]))
+        self.ln_trail_w.set_data([v * mm for v in ion.trail_x], [v * mm for v in ion.trail_y])
+        self.pt_ion_w.set_data([ion.s[X] * mm], [ion.s[Y] * mm])
+        if ion.outcome == "wafer":
+            self.pt_hit_w.set_data([ion.s[X] * mm], [ion.s[Y] * mm])
+        else:
+            self.pt_hit_w.set_data([], [])
 
-    def on_param(self, _=None):
-        self.read_params()
-        self.fc = compute_forecast(self.p)
-        self.ion.reset(self.p)
-        self.rebuild_scene()
-        self.refresh()
+        # Text Output
+        if ion.outcome == "wafer":
+            r = math.hypot(ion.s[X], ion.s[Y])
+            ok = r <= p.wafer_R
+            txt = f"IMPACT\nx = {ion.s[X] * 1e3:+.2f} mm\ny = {ion.s[Y] * 1e3:+.2f} mm\nr = {r * 1e3:.2f} mm\n-> " + (
+                "ON" if ok else "OFF")
+            self.wr_sim.set_text(txt)
+            self.wr_sim.set_color("#2b8a3e" if ok else "#d62728")
+        elif ion.outcome in ("plate_x", "plate_y"):
+            self.wr_sim.set_text(f"Stopped by {ion.outcome[-1]} plates")
+            self.wr_sim.set_color("#d62728")
+        else:
+            self.wr_sim.set_text("In flight...")
+            self.wr_sim.set_color("#666666")
+
+        L_ = ["BEAM", f"v0 = {p.v0:.3e} m/s", f"E_x = {p.Vx / p.dx:+.3e} V/m", f"E_d = {p.Vd / p.d:+.3e} V/m"]
+        L_.append("")
+        L_.append("SIMULATION")
+        if ion.outcome == "wafer":
+            L_.append("status = hit wafer")
+        else:
+            status = {"plate_x": "hit x plate", "plate_y": "hit y plate", "miss": "turned back"}.get(ion.outcome or "")
+            L_.append(f"status = {status}")
+        L_.append(f"t = {ion.t * 1e6:.4f} µs")
+        L_.append(f"z = {ion.s[Z]:+.5f} m")
+        L_.append(f"x = {ion.s[X]:+.5f} m")
+        L_.append(f"y = {ion.s[Y]:+.5f} m")
+        self.info.set_text("\n".join(L_))
+
+        self.b_run.label.set_text("Stop" if self.running else "Start")
+        self.fig.canvas.draw_idle()
 
     def on_run(self, _=None):
         if self.ion.outcome:
@@ -513,39 +449,15 @@ class App:
         self.running = not self.running
         self.refresh()
 
-    def on_step(self, _=None):
-        self.running = False
-        if self.ion.outcome:
-            self.ion.reset(self.p)
-        self.ion.advance(self.p, self.p.t_ref / self.STEPS_PER_FLIGHT)
-        self.refresh()
-
     def on_reset(self, _=None):
         self.running = False
         self.ion.reset(self.p)
         self.refresh()
 
-    def on_defaults(self, _=None):
-        self.running = False
-        for key, _, vinit, _, _ in TEXT_INPUTS:
-            if key in self.txt_boxes:
-                self.txt_boxes[key].set_val(vinit)
-        if self.chk.get_status()[0]:
-            self.chk.eventson = False
-            self.chk.set_active(0)
-            self.chk.eventson = True
-        self.on_param()
-
-    def on_key(self, event):
-        if event.key == " ":
-            self.on_run()
-        elif event.key in ("n", "N"):
-            self.on_step()
-
     def tick(self):
         if not self.running:
             return
-        dt = self.p.t_ref / self.FRAMES_PER_FLIGHT * self.p.speed
+        dt = self.p.t_ref / self.FRAMES_PER_FLIGHT
         self.ion.advance(self.p, dt)
         if self.ion.outcome:
             self.running = False
