@@ -4,13 +4,8 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="71ed4e81-55c9-4c6f-83ba-bac86ef1e506" name="Changes" comment="Laggy issue">
-      <change afterPath="$PROJECT_DIR$/.idea/Ion Beam Deflection Animation.iml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/inspectionProfiles/profiles_settings.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/modules.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+    <list default="true" id="71ed4e81-55c9-4c6f-83ba-bac86ef1e506" name="Changes" comment="Schematic of beam deflection with bending angle  under a uniform electric field created by vertical plates y axis.">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -29,20 +24,20 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent"><![CDATA[{
-  "keyToString": {
-    "Python.Ion Beam Trajecroy in Mass Spectrometer.executor": "Run",
-    "Python.scratch_1.executor": "Run",
-    "RunOnceActivity.ShowReadmeOnStart": "true",
-    "git-widget-placeholder": "master",
-    "last_opened_file_path": "D:/LePhucKhangGia/Bách Khoa/Physics 1 _Dr Gary Watson/Ion Beam Deflection/Ion Beam Deflection Animation"
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;Python.Ion Beam Trajecroy in Mass Spectrometer.executor&quot;: &quot;Run&quot;,
+    &quot;Python.scratch_1.executor&quot;: &quot;Run&quot;,
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;master&quot;,
+    &quot;last_opened_file_path&quot;: &quot;D:/LePhucKhangGia/Bách Khoa/Physics 1 _Dr Gary Watson/Ion Beam Deflection/Ion Beam Deflection Animation&quot;
   },
-  "keyToStringList": {
-    "com.intellij.ide.scratch.ScratchImplUtil$2/New Scratch File": [
-      "Python"
+  &quot;keyToStringList&quot;: {
+    &quot;com.intellij.ide.scratch.ScratchImplUtil$2/New Scratch File&quot;: [
+      &quot;Python&quot;
     ]
   }
-}]]></component>
+}</component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
       <recent name="D:\LePhucKhangGia\Bách Khoa\Physics 1 _Dr Gary Watson\Ion Beam Deflection\Ion Beam Deflection Animation" />
@@ -72,11 +67,20 @@
       <option name="project" value="LOCAL" />
       <updated>1792853850447</updated>
     </task>
-    <option name="localTasksCounter" value="2" />
+    <task id="LOCAL-00002" summary="Schematic of beam deflection with bending angle  under a uniform electric field created by vertical plates y axis.">
+      <option name="closed" value="true" />
+      <created>1793260027302</created>
+      <option name="number" value="00002" />
+      <option name="presentableId" value="LOCAL-00002" />
+      <option name="project" value="LOCAL" />
+      <updated>1793260027302</updated>
+    </task>
+    <option name="localTasksCounter" value="3" />
     <servers />
   </component>
   <component name="VcsManagerConfiguration">
     <MESSAGE value="Laggy issue" />
-    <option name="LAST_COMMIT_MESSAGE" value="Laggy issue" />
+    <MESSAGE value="Schematic of beam deflection with bending angle  under a uniform electric field created by vertical plates y axis." />
+    <option name="LAST_COMMIT_MESSAGE" value="Schematic of beam deflection with bending angle  under a uniform electric field created by vertical plates y axis." />
   </component>
 </project>
