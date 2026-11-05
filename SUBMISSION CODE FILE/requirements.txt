@@ -1,0 +1,5 @@
+#Install these library before running the program
+numpy
+scipy
+pandas
+matplotlib

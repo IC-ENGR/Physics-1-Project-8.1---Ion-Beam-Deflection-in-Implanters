@@ -1,0 +1,51 @@
+{
+  "system": "Ion Beam Deflection in an Implanter",
+  "constants": {
+    "elementary_charge": 1.602176634e-19,
+    "atomic_mass_unit": 1.66053906660e-27,
+    "speed_of_light": 299792458.0
+  },
+  "parameters": {
+    "V0": 20.0,
+    "Vy": 1000.0,
+    "ly": 0.10,
+    "dy": 0.04,
+    "Vx": 500.0,
+    "lx": 0.10,
+    "dx": 0.02,
+    "gap_xy": 0.05,
+    "L": 0.50,
+    "wafer_dia": 150.0,
+    "q": 1.0,
+    "m": 11.0088
+  },
+  "geometry": {
+    "tube_len": 0.08,
+    "tube_gap": 0.08
+  },
+  "initial_conditions": {
+    "x0": 0.0,
+    "y0": 0.0,
+    "vx0": 0.0,
+    "vy0": 0.0
+  },
+  "simulation": {
+    "dt": 5e-9,
+    "t_max": 1e-5
+  },
+  "solver": {
+    "method": "DOP853",
+    "rtol": 1e-10,
+    "atol": 1e-12
+  },
+  "output": {
+    "results_dir": "outputs",
+    "figures_dir": "visualizations",
+    "results_csv": "simulation_results.csv",
+    "dpi": 300
+  },
+  "viewer": {
+    "frame_ms": 30,
+    "frames_per_flight": 100
+  }
+}
