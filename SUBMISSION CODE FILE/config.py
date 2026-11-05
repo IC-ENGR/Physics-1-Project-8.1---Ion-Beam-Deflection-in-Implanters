@@ -20,7 +20,7 @@ REQUIRED = {
 TOP_LEVEL = ("system") + tuple(REQUIRED)
 STRING_KEYS = {"solver": ("method",),
                "output": ("results_dir", "figures_dir", "results_csv")}
-SOLVER_METHODS = ("DOP853")
+SOLVER_METHODS = ("RK45", "RK23", "DOP853", "Radau", "BDF", "LSODA")
 
 def CheckFiniteNumber(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
